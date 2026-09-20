@@ -9,9 +9,9 @@ from colorama import Fore, Back
 class TestCharacter(CharacterEntity):
 
     def valid_spot(self, wrld, x, y):
-        if wrld.empty_at(x, y) and (0 <= x < wrld.width() and 0 <= y < wrld.height()):
-            return True
-        return False
+        if not (0 <= x < wrld.width() and 0 <= y < wrld.height()):
+            return False
+        return wrld.empty_at(x, y) or wrld.exit_at(x, y)
     
     def get_neighbors(self, wrld, current):
         x, y = current
