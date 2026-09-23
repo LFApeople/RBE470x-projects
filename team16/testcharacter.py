@@ -84,11 +84,13 @@ class TestCharacter(CharacterEntity):
         path = self.astar_path_to_exit(wrld, start, goal)
         next_pos = path[1] if path and len(path) > 1 else None
 
+        # Get all monsters and their positions
         monsters = []
         for objects in wrld.monsters.values():
             for monster in objects:
                 monsters.append((monster.x, monster.y))
 
+        # Used for checking all possible choices that a monster can make
         def monster_choices(position):
             choices = [position]
             x, y = position
@@ -98,18 +100,20 @@ class TestCharacter(CharacterEntity):
                     choices.append((nx, ny))
             return choices
 
-        def score(position, monster_positions):
-            danger = 0
+        # Try to quantify the danger of any path with a slight preference for staying on the current route
+        def danger(position, monster_positions):
+            dang = 0
             for monster in monster_positions:
                 distance = min(abs(position[0] - monster[0]), abs(position[1] - monster[1]))
-                danger = max(danger, 3 - distance) ^ 2
+                dang = max(dang, 3 - distance)
             distance_to_exit = abs(position[0] - goal[0]) + abs(position[1] - goal[1])
             route_penalty = 0 if next_pos == position else 2
-            return danger + distance_to_exit + route_penalty
+            return dang + distance_to_exit + route_penalty
 
+        # Check all positions that monsters can move into and their danger scores
         def chance(position, monster_positions, turns):
             if turns == 0 or not monster_positions:
-                return score(position, monster_positions)
+                return danger(position, monster_positions)
             outcomes = [[]]
             for monster in monster_positions:
                 outcomes = [prefix + [next_position]
@@ -117,18 +121,19 @@ class TestCharacter(CharacterEntity):
                             for next_position in monster_choices(monster)]
                 if len(outcomes) > 256:
                     outcomes = outcomes[:256]
-            return sum(score(position, outcome) for outcome in outcomes) / len(outcomes)
+            return sum(danger(position, outcome) for outcome in outcomes) / len(outcomes)
 
+
+        # Actually use all the functions to try and find the best move
         candidates = []
         for dx, dy in self.moves:
             position = (start[0] + dx, start[1] + dy)
             if self.valid_spot(wrld, *position):
                 candidates.append((chance(position, monsters, depth - 1), dx, dy))
-        if not candidates:
-            return None
         _, dx, dy = min(candidates)
         return dx, dy
 
+    # Needed to actually find where the goal is
     def get_exit(self, wrld):
         for x in range(wrld.width()):
             for y in range(wrld.height()):
@@ -136,6 +141,7 @@ class TestCharacter(CharacterEntity):
                     return (x, y)
         return None
 
+    # Primary function where information is given to the expectimax algorithm, runs it, and declares the move
     def do(self, wrld):
         me = wrld.me(self)
         start = (me.x, me.y)
