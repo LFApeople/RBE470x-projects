@@ -106,7 +106,7 @@ class TestCharacter(CharacterEntity):
             for monster in monster_positions:
                 distance = min(abs(position[0] - monster[0]), abs(position[1] - monster[1]))
                 dang = max(dang, 3 - distance)
-            distance_to_exit = abs(position[0] - goal[0]) + abs(position[1] - goal[1])
+            distance_to_exit = max(abs(position[0] - goal[0]), abs(position[1] - goal[1]))
             route_penalty = 0 if next_pos == position else 2
             return dang + distance_to_exit + route_penalty
 
@@ -130,8 +130,7 @@ class TestCharacter(CharacterEntity):
             position = (start[0] + dx, start[1] + dy)
             if self.valid_spot(wrld, *position):
                 candidates.append((chance(position, monsters, depth - 1), dx, dy))
-        _, dx, dy = min(candidates)
-        return dx, dy
+        return candidates
 
     # Needed to actually find where the goal is
     def get_exit(self, wrld):
@@ -147,5 +146,7 @@ class TestCharacter(CharacterEntity):
         start = (me.x, me.y)
         goal = self.get_exit(wrld)
 
-        dx, dy = self.expectimax_move(wrld, start, goal)
-        self.move(dx, dy)
+        options = self.expectimax_move(wrld, start, goal)
+        options.sort()
+            
+        self.move(options[0][1], options[0][2])
