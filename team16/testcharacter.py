@@ -8,13 +8,16 @@ from sensed_world import SensedWorld
 from colorama import Fore, Back
 
 class TestCharacter(CharacterEntity):
-    moves = [(-1, -1), (0, -1), (1, -1), (-1,  0), (1,  0), (-1,  1), (0,  1), (1,  1)]
+    # List of standard moves that can be made by any entity at any time
+    moves = [(-1, -1), (0, -1), (1, -1), (-1,  0), (0, 0), (1,  0), (-1,  1), (0,  1), (1,  1)]
 
+    # Check if a spot can be moved into by the character
     def valid_spot(self, wrld, x, y):
         if not (0 <= x < wrld.width() and 0 <= y < wrld.height()):
             return False
         return wrld.empty_at(x, y) or wrld.exit_at(x, y)
 
+    # Get all empty spaces neighboring a position
     def get_neighbors(self, wrld, current):
         x, y = current
         neighbors = []
@@ -25,6 +28,7 @@ class TestCharacter(CharacterEntity):
                 neighbors.append(((nx, ny), 1))
         return neighbors
 
+    # Find any monsters adjacent to current position
     def get_neighbors_monsters(self, wrld, current):
         x, y = current
         monsters = []
@@ -36,14 +40,14 @@ class TestCharacter(CharacterEntity):
                     monsters.append(((nx, ny), 1))
         return monsters
 
-    
+    # Primary golden path to exit with Astar
     def astar_path_to_exit(self, wrld, start, goal):
         frontier = []
         heapq.heappush(frontier, (0, 0, start))
         
         came_from = {}
         cost_so_far = {start: 0}
-        entry_counter = 0
+        counter = 0
 
         while frontier:
             _, _, current = heapq.heappop(frontier)
@@ -61,9 +65,7 @@ class TestCharacter(CharacterEntity):
             for next_node, step_cost in self.get_neighbors(wrld, current):
                 new_cost = cost_so_far[current] + step_cost
                 if next_node not in cost_so_far or new_cost < cost_so_far[next_node]:
-                    # Penalize every monster near a possible path node so the
-                    # route leaves a safety buffer instead of merely avoiding
-                    # the monster's current square.
+                    # Astar priorit based upon cost to get their + monster hindrance + heuristic (max(abs(next_node[0] - goal[0]), abs(next_node[1] - goal[1])))
                     new_cost += len(
                         self.get_neighbors_monsters(
                             wrld, (next_node[0], next_node[1])
@@ -71,19 +73,21 @@ class TestCharacter(CharacterEntity):
                     )
                     cost_so_far[next_node] = new_cost
                     priority = new_cost + max(abs(next_node[0] - goal[0]), abs(next_node[1] - goal[1]))
-                    entry_counter += 1
-                    heapq.heappush(frontier, (priority, entry_counter, next_node))
+                    counter += 1
+                    heapq.heappush(frontier, (priority, counter, next_node))
                     came_from[next_node] = current
+        return path
 
-        return None
-
-    def expectimax_move(self, wrld, start, goal, depth=2):
+    # Primary control of movement through expectimax
+    # Takes Astar path as the main movement but allows further deviation to avoid monsters
+    def expectimax_move(self, wrld, start, goal, depth=3):
         path = self.astar_path_to_exit(wrld, start, goal)
-        route_next = path[1] if path and len(path) > 1 else None
+        next_pos = path[1] if path and len(path) > 1 else None
 
-        monsters = [(monster.x, monster.y)
-                    for cells in wrld.monsters.values()
-                    for monster in cells]
+        monsters = []
+        for objects in wrld.monsters.values():
+            for monster in objects:
+                monsters.append((monster.x, monster.y))
 
         def monster_choices(position):
             choices = [position]
@@ -97,11 +101,10 @@ class TestCharacter(CharacterEntity):
         def score(position, monster_positions):
             danger = 0
             for monster in monster_positions:
-                distance = min(abs(position[0] - monster[0]),
-                               abs(position[1] - monster[1]))
-                danger = max(danger, 3 - distance)
+                distance = min(abs(position[0] - monster[0]), abs(position[1] - monster[1]))
+                danger = max(danger, 3 - distance) ^ 2
             distance_to_exit = abs(position[0] - goal[0]) + abs(position[1] - goal[1])
-            route_penalty = 0 if route_next == position else 2
+            route_penalty = 0 if next_pos == position else 2
             return danger + distance_to_exit + route_penalty
 
         def chance(position, monster_positions, turns):
@@ -112,8 +115,8 @@ class TestCharacter(CharacterEntity):
                 outcomes = [prefix + [next_position]
                             for prefix in outcomes
                             for next_position in monster_choices(monster)]
-                if len(outcomes) > 128:
-                    outcomes = outcomes[:128]
+                if len(outcomes) > 256:
+                    outcomes = outcomes[:256]
             return sum(score(position, outcome) for outcome in outcomes) / len(outcomes)
 
         candidates = []
@@ -138,7 +141,5 @@ class TestCharacter(CharacterEntity):
         start = (me.x, me.y)
         goal = self.get_exit(wrld)
 
-
-        action = self.expectimax_move(wrld, start, goal)
-        if action:
-            self.move(*action)
+        dx, dy = self.expectimax_move(wrld, start, goal)
+        self.move(dx, dy)
