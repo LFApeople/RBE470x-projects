@@ -1,5 +1,6 @@
 # This is necessary to find the main code
 import heapq
+from random import random
 import sys
 sys.path.insert(0, '../bomberman')
 # Import necessary stuff
@@ -9,7 +10,15 @@ from colorama import Fore, Back
 
 class TestCharacter(CharacterEntity):
     # List of standard moves that can be made by any entity at any time
-    moves = [(-1, -1), (0, -1), (1, -1), (-1,  0), (0, 0), (1,  0), (-1,  1), (0,  1), (1,  1)]
+    smoves = [(-1, -1), (0, -1), (1, -1), (-1,  0), (0, 0), (1,  0), (-1,  1), (0,  1), (1,  1)]
+
+    def __init__(self):
+        self.weights = [1.0, -1.0, -1.0]          # exit, monster, bomb
+        self.alpha, self.gamma, self.epsilon = 0.1, 0.9, 0.1
+        self.prev_features = None
+        self.prev_q = None
+        self.prev_exit_dist = None
+        self.safety_margin = 1.0
 
     # Check if a spot can be moved into by the character
     def valid_spot(self, wrld, x, y):
@@ -39,6 +48,56 @@ class TestCharacter(CharacterEntity):
                 if wrld.monsters_at(nx, ny):
                     monsters.append(((nx, ny), 1))
         return monsters
+
+    
+    def exit_distance(self, wrld, pos, goal):
+        path = self.astar_path_to_exit(wrld, pos, goal)
+        return len(path) if path else wrld.width() + wrld.height()
+
+    #Q learning Implimation helper functions
+
+    def features(self, wrld, pos, goal):
+        f_exit = 1.0 / (1 + self.exit_distance(wrld, pos, goal))
+
+        m_d = [max(abs(pos[0] - m.x), abs(pos[1] - m.y))
+                for ms in wrld.monsters.values() for m in ms]
+        f_monster = 1.0 / (1 + min(m_d)) if m_d else 0.0
+
+        b_d = [abs(pos[0] - b.x) + abs(pos[1] - b.y)
+                for bs in wrld.bombs.values() for b in bs]
+        f_bomb = 1.0 / (1 + min(b_d)) if b_d else 0.0
+
+        return [f_exit, f_monster, f_bomb]
+
+    def Q_value(wrld, features, weights):
+            return sum(w * f for w, f in zip(weights, features))
+    
+    # Evaluate every legal move from pos -> list of (q, (dx, dy), feats)
+    def action_values(self, wrld, pos, goal):
+        results = []
+        for dx, dy in self.moves:
+            p = (pos[0] + dx, pos[1] + dy)
+            if (dx, dy) == (0, 0) or self.valid_spot(wrld, *p):
+                feats = self.features(wrld, p, goal)
+                results.append((self.q_value(feats), (dx, dy), feats))
+        return results
+
+    def reward(self, wrld, pos, goal):
+        dist = self.exit_distance(wrld, pos, goal)
+        r = (self.prev_exit_dist - dist) if self.prev_exit_dist is not None else 0
+        if self.get_neighbors_monsters(wrld, pos):
+            r -= 5          # adjacent to a monster
+        if pos == goal:
+            r += 100
+        return r, dist
+
+    def update_weights(self, reward, next_best_q):
+        delta = (reward + self.gamma * next_best_q) - self.prev_q
+        self.weights = [w + self.alpha * delta * f
+                        for w, f in zip(self.weights, self.prev_features)]
+
+
+
 
     # Primary golden path to exit with Astar
     def astar_path_to_exit(self, wrld, start, goal):
@@ -133,43 +192,7 @@ class TestCharacter(CharacterEntity):
         return candidates
 
 
-    def AproximateQ(self, wrld, position, goal):
-        #initial values for testing 
-        alpha, gamma, epsilon = 0.1, 0.9, 0.1
-        
-        # weights: [exit, monseter, bomb, bias]
-        weights = [1.0, -1.0, -1.0, 0.0]
-
-        def featurest(wrld, pos, goal):
-            path = self.astar_path_to_exit(wrld, pos, goal)
-            exit_distance = len(path) if path else wrld.width() + wrld.height()
-            f_exit = 1.0 / (1 + exit_distance)  #increases as we get closer to the exit
-
-            m_d = [max(abs(pos[0] - monster.x), abs(pos[1] - monster.y)) 
-                   for monsters in wrld.monsters.values() for monster in monsters]
-            f_monster = 1.0 / (1 + min(m_d)) if m_d else 0.0 #increases as we get closer to a monster
-
-            b_d = [abs(pos[0] - bomb.x) + abs(pos[1] - bomb.y) for bombs in wrld.bombs.values() for bomb in bombs]
-
-
-
-
-        Q = weights[0] * feature_exit + weights[1] * feature_bomb + weights[2] * feature_monster + weights[3]    * feature_distance
-
-        def update_weight(weight, feature, alpha, reward, gamma, Q):
-            return weight + alpha * (delta(reward, gamma, Q)) * feature
-
-        def delta(reward, gamma, Q):
-            return reward + gamma * max() - Q
-
-        
-
-
-
-
-        return Q
-
-    # Needed to actually find where the goal is
+# Needed to actually find where the goal is
     def get_exit(self, wrld):
         for x in range(wrld.width()):
             for y in range(wrld.height()):
