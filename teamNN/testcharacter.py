@@ -1,12 +1,36 @@
 # This is necessary to find the main code
 import heapq
 import sys
-from random import random
+
+import random
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torch.nn.functional as F
+
 sys.path.insert(0, '../bomberman')
 # Import necessary stuff
 from entity import CharacterEntity
 from sensed_world import SensedWorld
 from colorama import Fore, Back
+
+Transition = namedtuple('Transition', 
+                        ('state', 'action', 'next_state', 'reward'))
+
+class ReplayMemory(object):
+
+    def __init__(self,capacity):
+        self.memory = deque([],maxlen=capacity)
+
+    def push(self,*args):
+        """Saves a transition."""
+        self.memory.append(Transition(*args))
+
+    def sample(self,batch_size):
+        return random.sample(self.memory,batch_size)
+
+    def __len__(self):
+        return len(self.memory)
 
 class TestCharacter(CharacterEntity):
     # List of standard moves that can be made by any entity at any time
@@ -35,6 +59,22 @@ class TestCharacter(CharacterEntity):
             if self.valid_spot(wrld, nx, ny):
                 neighbors.append(((nx, ny), 1))
         return neighbors
+
+    #finn what cells an explosion will effect
+    def blast_cells(self, wrld, bx, by):
+        """Cells a bomb at (bx, by) will hit (stops at walls)."""
+        rng = getattr(wrld, "expl_range", 4)
+        cells = {(bx, by)}
+        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
+            for i in range(1, rng + 1):
+                x, y = bx + dx * i, by + dy * i
+                if not (0 <= x < wrld.width() and 0 <= y < wrld.height()):
+                    break
+                if wrld.wall_at(x, y):
+                    break
+                cells.add((x, y))
+        return cells
+
 
     # Find any monsters adjacent to current position
     def get_neighbors_monsters(self, wrld, current):
@@ -86,6 +126,8 @@ class TestCharacter(CharacterEntity):
                     came_from[next_node] = current
         return path
 
+
+    
     # Primary control of movement through expectimax
     # Takes Astar path as the main movement but allows further deviation to avoid monsters
     def expectimax_move(self, wrld, start, goal, depth=3):
@@ -148,38 +190,54 @@ class TestCharacter(CharacterEntity):
                     return (x, y)
         return None
 
-    def action_values(self, wrld, pos, goal):
-        results = []
-        for dx, dy in self.moves:
-            p = (pos[0] + dx, pos[1] + dy)
-            if (dx, dy) == (0, 0) or self.valid_spot(wrld, *p):
-                feats = self.features(wrld, p, goal)
-                results.append((self.q_value(feats), (dx, dy), feats))
-        return results
+    def select_action(self, wrld, start, goal):
+        # Get the current state features
+        features = self.get_features(wrld, start, goal)
+        q_values = self.get_q_values(features)
+
+        # Epsilon-greedy action selection
+        if random.random() < self.epsilon:
+            action_index = random.randint(0, len(self.moves) - 1)
+        else:
+            action_index = torch.argmax(q_values).item()
+
+        return action_index
 
     # Primary function where information is given to the expectimax algorithm, runs it, and declares the move
     def do(self, wrld):
         me = wrld.me(self)
-        pos = (me.x, me.y)
+        start = (me.x, me.y)
         goal = self.get_exit(wrld)
 
-        options = self.action_values(wrld, pos, goal)
-        if not options:
-            return
+        options = self.expectimax_move(wrld, start, goal)
+        options.sort()
+            
+        self.move(options[0][1], options[0][2])
 
-        # 1) learn from the previous step
-        if self.prev_features is not None:
-            r, dist = self.reward(wrld, pos, goal)
-            self.update_weights(r, max(o[0] for o in options))
+
+        #initialize replay memory
+        D = ReplayMemory(10000)
+
+        if torch.cuda.is_available() or torch.backends.mps.is_available():
+            num_episodes = 600
         else:
-            dist = self.exit_distance(wrld, pos, goal)
+            num_episodes = 50
+        #initialize action-value function Q with random weights
 
-        # 2) choose an action (epsilon-greedy)
-        if random.random() < self.epsilon:
-            q, (dx, dy), feats = random.choice(options)
-        else:
-            q, (dx, dy), feats = max(options, key=lambda o: o[0])
-
-        # 3) remember for next turn
-        self.prev_features, self.prev_q, self.prev_exit_dist = feats, q, dist
-        self.move(dx, dy)
+        #initialize target value function Q' with weights θ− = θ
+        
+        for i in range(num_episodes):
+            #initialize sequence s1 = {x1} and preprocessed sequence φ1 = φ(s1)
+            for t in count():
+                action = select_action(wrld, start, goal)
+                #with probability ε select a random action at
+                #otherwise select at = argmaxa Q(φ(st), a; θ)
+                #execute action at in emulator and observe reward rt and image xt+1
+                #set st+1 = st, at, xt+1 and preprocess φt+
+                #store transition (φt, at, rt, φt+1) in D
+                #sample random minibatch of transitions (φj, aj, rj, φj+1) from D
+                #set yj = { rj for terminal φj+1
+                #otherwise set yj = rj + γ maxa' Q'(φj+1, a'; θ−)
+                #perform a gradient descent step on (yj − Q(φj, aj; θ))2 with respect to the network parameters θ
+                #Every C steps reset Q' = Q
+        
