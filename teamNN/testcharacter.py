@@ -60,7 +60,7 @@ class TestCharacter(CharacterEntity):
                 neighbors.append(((nx, ny), 1))
         return neighbors
 
-    #finn what cells an explosion will effect
+    # Find what cells an explosion will affect
     def blast_cells(self, wrld, bx, by):
         """Cells a bomb at (bx, by) will hit (stops at walls)."""
         rng = getattr(wrld, "expl_range", 4)
@@ -75,6 +75,47 @@ class TestCharacter(CharacterEntity):
                 cells.add((x, y))
         return cells
 
+    #helper funtion for finding the damger of cells
+
+    def build_danger(self, wrld):
+        """
+        Returns:
+          blast_time: {cell: [(start_tick, end_tick), ...]} windows when cell is deadly
+          monsters:   list of (x, y)
+        """
+        duration = getattr(wrld, "expl_duration", 2)
+        blast_time = {}
+
+        # Bombs: deadly from tick `timer` for `duration` ticks
+        for bomb in wrld.bombs.values():
+            for cell in self.blast_cells(wrld, bomb.x, bomb.y):
+                blast_time.setdefault(cell, []).append(
+                    (bomb.timer, bomb.timer + duration))
+
+        # Already-active explosions: deadly right now until they expire
+        for expl in wrld.explosions.values():
+            blast_time.setdefault((expl.x, expl.y), []).append((0, expl.timer))
+
+        monsters = [(m.x, m.y) for ms in wrld.monsters.values() for m in ms]
+        return blast_time, monsters
+
+    #helper for if a cell is deadly to avoid
+
+    def cell_deadly(self, cell, t, blast_time, monsters):
+        for start, end in blast_time.get(cell, []):
+            if start <= t < end:
+                return True
+        radius = 1 + int(self.safety_margin)   # monsters assumed to close in
+        for mx, my in monsters:
+            if max(abs(cell[0] - mx), abs(cell[1] - my)) <= radius - t // 2 * 0:
+                return True
+        return False
+
+    def is_threatened(self, wrld, pos, horizon=4):
+        """True if standing still at pos gets you hurt within `horizon` ticks."""
+        blast_time, monsters = self.build_danger(wrld)
+        return any(self.cell_deadly(pos, t, blast_time, monsters)
+                   for t in range(horizon + 1))
 
     # Find any monsters adjacent to current position
     def get_neighbors_monsters(self, wrld, current):
@@ -190,6 +231,56 @@ class TestCharacter(CharacterEntity):
                     return (x, y)
         return None
 
+
+    #Q learning Implimation helper functions
+
+    def features(self, wrld, pos, goal):
+        f_exit = 1.0 / (1 + self.exit_distance(wrld, pos, goal))
+
+        m_d = [max(abs(pos[0] - m.x), abs(pos[1] - m.y))
+                for ms in wrld.monsters.values() for m in ms]
+        f_monster = 1.0 / (1 + min(m_d)) if m_d else 0.0
+
+        b_d = [abs(pos[0] - b.x) + abs(pos[1] - b.y)
+                for bs in wrld.bombs.values() for b in bs]
+        f_bomb = 1.0 / (1 + min(b_d)) if b_d else 0.0
+
+        return [f_exit, f_monster, f_bomb]
+
+    def Q_value(self, features, weights=None):
+        if weights is None:
+            weights = self.weights
+        return sum(w * f for w, f in zip(weights, features))
+
+    # Evaluate every legal move from pos -> list of (q, (dx, dy), feats)
+    def action_values(self, wrld, pos, goal):
+        results = []
+        for dx, dy in self.moves:
+            p = (pos[0] + dx, pos[1] + dy)
+            if (dx, dy) == (0, 0) or self.valid_spot(wrld, *p):
+                feats = self.features(wrld, p, goal)
+                results.append((self.q_value(feats), (dx, dy), feats))
+        return results
+
+    def reward(self, wrld, pos, goal):
+        dist = self.exit_distance(wrld, pos, goal)
+        r = (self.prev_exit_dist - dist) if self.prev_exit_dist is not None else 0
+        if self.get_neighbors_monsters(wrld, pos):
+            r -= 5          # adjacent to a monster
+        if pos == goal:
+            r += 100
+        return r, dist
+
+    def update_q(self, reward, next_features=None, terminal=False):
+        if self.previous_features is None or self.previous_action is None:
+            return
+        old_q = self.q_value(self.previous_features)
+        future = 0.0 if terminal or next_features is None else self.Q_value(next_features)
+        delta = (reward + self.gamma * next_best_q) - self.prev_q
+        self.weights = [w + self.alpha * delta * f
+                        for w, f in zip(self.weights, self.prev_features)]
+
+
     def select_action(self, wrld, start, goal):
         # Get the current state features
         features = self.get_features(wrld, start, goal)
@@ -202,6 +293,57 @@ class TestCharacter(CharacterEntity):
             action_index = torch.argmax(q_values).item()
 
         return action_index
+
+    #escape move to avoid danger can be  mreo itnegrated later 
+    def escape_move(self, wrld, start, max_steps=10):
+        """
+        BFS over (cell, tick). Finds the shortest sequence of moves to a cell
+        that is out of every blast zone and away from monsters.
+        Returns (dx, dy), or None if already safe / nothing reachable.
+        """
+        blast_time, monsters = self.build_danger(wrld)
+
+        def passable(x, y):
+            return (0 <= x < wrld.width() and 0 <= y < wrld.height()
+                    and not wrld.wall_at(x, y)
+                    and not wrld.bombs_at(x, y))
+
+        def permanently_safe(cell):
+            # outside every blast zone and not near a monster
+            if cell in blast_time:
+                return False
+            return not self.cell_deadly(cell, 0, {}, monsters)
+
+        if permanently_safe(start) and not self.is_threatened(wrld, start):
+            return None
+
+        queue = deque([(start, 0, None)])        # (cell, tick, first_move)
+        seen = {(start, 0)}
+        fallback = None                          # best "survive a bit longer" move
+
+        while queue:
+            (x, y), t, first = queue.popleft()
+
+            if first is not None and permanently_safe((x, y)):
+                return first
+
+            if t >= max_steps:
+                continue
+
+            for dx, dy in self.moves:            # includes (0, 0) = wait
+                nx, ny = x + dx, y + dy
+                nt = t + 1
+                if not passable(nx, ny) or ((nx, ny), nt) in seen:
+                    continue
+                if self.cell_deadly((nx, ny), nt, blast_time, monsters):
+                    continue
+                seen.add(((nx, ny), nt))
+                move = first if first is not None else (dx, dy)
+                if fallback is None and nt >= 3:
+                    fallback = move
+                queue.append(((nx, ny), nt, move))
+
+        return fallback
 
     # Primary function where information is given to the expectimax algorithm, runs it, and declares the move
     def do(self, wrld):
