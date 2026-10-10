@@ -38,4 +38,4 @@ g.add_character(InteractiveCharacter("me", # name
 # g.go(0)
 
 # Use this if you want to proceed automatically
-g.go(0)
+g.go(1)
