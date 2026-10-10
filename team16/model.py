@@ -1,5 +1,7 @@
 import copy
 import os
+import tempfile
+import uuid
 
 import torch
 import torch.nn as nn
@@ -39,16 +41,48 @@ class Linear_QNet(nn.Module):
         return x
     
     def save(self, file_name='model.pth'):
-        if not os.path.exists(self.model_folder_path):
-            os.makedirs(self.model_folder_path)
-        
-        file_name = os.path.join(self.model_folder_path, file_name)
-        torch.save(self.state_dict(), file_name)
+        os.makedirs(self.model_folder_path, exist_ok=True)
+        target_path = os.path.join(self.model_folder_path, file_name)
+        target_dir = os.path.dirname(target_path)
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(file_name)}.",
+            suffix=".tmp",
+            dir=target_dir,
+        )
+        os.close(descriptor)
+
+        try:
+            torch.save(self.state_dict(), temporary_path)
+            try:
+                os.replace(temporary_path, target_path)
+            except OSError as error:
+                if getattr(error, "winerror", None) not in (5, 1224):
+                    raise
+                checkpoint_path = os.path.join(
+                    target_dir,
+                    f"{os.path.basename(file_name)}.checkpoint-{uuid.uuid4().hex}.pth",
+                )
+                os.replace(temporary_path, checkpoint_path)
+        finally:
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
 
     def load(self, file_name='model.pth'):
-        file_name = os.path.join(self.model_folder_path, file_name)
+        file_path = os.path.join(self.model_folder_path, file_name)
+        checkpoint_prefix = f"{os.path.basename(file_name)}.checkpoint-"
+        checkpoint_paths = [
+            os.path.join(self.model_folder_path, candidate)
+            for candidate in os.listdir(self.model_folder_path)
+            if candidate.startswith(checkpoint_prefix) and candidate.endswith(".pth")
+        ]
+        available_paths = [
+            path for path in [file_path, *checkpoint_paths] if os.path.isfile(path)
+        ]
+        if available_paths:
+            file_path = max(available_paths, key=os.path.getmtime)
+
         state_dict = torch.load(
-            file_name,
+            file_path,
             map_location=next(self.parameters()).device,
             weights_only=True,
         )
