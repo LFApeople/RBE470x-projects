@@ -1,15 +1,7 @@
 import os
 from abc import ABC, abstractmethod
 import torch
-from torch import nn
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms
 from testcharacter import TestCharacter
-import heapq
-import sys
-
-import collections
-import math
 import json
 import os
 import random
@@ -17,15 +9,9 @@ from collections import deque
 from entity import CharacterEntity
 from sensed_world import SensedWorld
 from events import Event
-from colorama import Fore, Back
-
-import torch
-import random
 import numpy as np
-from collections import deque
 from model import Linear_QNet, QTrainer
 import matplotlib.pyplot as plt
-from IPython import display
 
 plt.ion()
 
@@ -94,22 +80,36 @@ def plot(scores, mean_scores, title='Training...', save_path=None):
 MAX_MEMORY = 100_000
 BATCH_SIZE = 1000
 LR = 0.001
+device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+torch.set_default_device(torch.device(device))
 
 class Agent(CharacterEntity):
     
-    def __init__(self, name, avatar, x, y):
+    def __init__(self, name, avatar, x, y, mode=0):
         super().__init__(name, avatar, x, y)
         self.Test = TestCharacter(name, avatar, x, y)
         self.n_games = 0
         self.epsilon = 0 # randomness
         self.gamma = 0.9 # discount rate
         self.memory = deque(maxlen=MAX_MEMORY) # popleft()
-        self.model = Linear_QNet(43, 256, 3)
+        self.model = Linear_QNet(33, 256, 10)
         self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
-        self.training = True
+        self.training = mode # 0 = no training, 1 = self-training, 2 = guided training, 3 = teaching
         self._plot_scores = []
         self._plot_mean_scores = []
         self._total_score = 0
+        self.bankedGames = [
+            "bdsccccwddds",
+            "bdscccbwddsd",
+            "dbsaccccdwddds",
+            "bsdcccbwddds",
+            "bdsccccwddswds",
+            "sdbawcccbdsddd",
+            "bscdccbcwddds",
+        ]
+        self.guide_game = random.randint(0, len(self.bankedGames) - 1)
+        self.guided_turn = 0
+        self.guide_string = ""
         self._record = -5000
         self._training_state_path = os.path.join(self.model.model_folder_path, 'training_state.json')
         self._load_training_state()
@@ -126,6 +126,18 @@ class Agent(CharacterEntity):
         except (TypeError, ValueError):
             return 1
 
+    def danger(self, wrld, x, y):
+        if not self.Test.valid_spot(wrld, x, y):
+            return 1
+        if wrld.explosion_at(x, y):
+            return 1
+        if wrld.monsters_at(x, y):
+            return 1
+        if wrld.bomb_at(x, y):
+            return 1
+        return 0
+        
+
     def get_state(self, wrld):
 
         
@@ -133,61 +145,52 @@ class Agent(CharacterEntity):
         valid__1__1 = self.Test.valid_spot(wrld, self.me.x - 1, self.me.y - 1)
         empty__1__1 = valid__1__1 and wrld.empty_at(self.me.x - 1, self.me.y - 1)
         wall__1__1 = valid__1__1 and wrld.wall_at(self.me.x - 1, self.me.y - 1)
-        bomb__1__1 = valid__1__1 and wrld.bomb_at(self.me.x - 1, self.me.y - 1)
-        explosion__1__1 = valid__1__1 and wrld.explosion_at(self.me.x - 1, self.me.y - 1)
-        monster__1__1 = valid__1__1 and wrld.monsters_at(self.me.x - 1, self.me.y - 1)
+        danger__1__1 = self.danger(wrld, self.me.x - 1, self.me.y - 1)
 
         # (-1, 0)
         valid__1__0 = self.Test.valid_spot(wrld, self.me.x - 1, self.me.y)
         empty__1__0 = valid__1__0 and wrld.empty_at(self.me.x - 1, self.me.y)
         wall__1__0 = valid__1__0 and wrld.wall_at(self.me.x - 1, self.me.y)
-        explosion__1__0 = valid__1__0 and wrld.explosion_at(self.me.x - 1, self.me.y)
-        monster__1__0 = valid__1__0 and wrld.monsters_at(self.me.x - 1, self.me.y)
+        danger__1__0 = self.danger(wrld, self.me.x - 1, self.me.y)
 
         # (-1, 1)
         valid__1_1 = self.Test.valid_spot(wrld, self.me.x - 1, self.me.y + 1)
         empty__1_1 = valid__1_1 and wrld.empty_at(self.me.x - 1, self.me.y + 1)
         wall__1_1 = valid__1_1 and wrld.wall_at(self.me.x - 1, self.me.y + 1)
-        bomb__1_1 = valid__1_1 and wrld.bomb_at(self.me.x - 1, self.me.y + 1)
-        explosion__1_1 = valid__1_1 and wrld.explosion_at(self.me.x - 1, self.me.y + 1)
-        monster__1_1 = valid__1_1 and wrld.monsters_at(self.me.x - 1, self.me.y + 1)
+        danger__1_1 = self.danger(wrld, self.me.x - 1, self.me.y + 1)
 
         # (0, -1)
         valid__0__1 = self.Test.valid_spot(wrld, self.me.x, self.me.y - 1)
         empty__0__1 = valid__0__1 and wrld.empty_at(self.me.x, self.me.y - 1)
         wall__0__1 = valid__0__1 and wrld.wall_at(self.me.x, self.me.y - 1)
-        explosion__0__1 = valid__0__1 and wrld.explosion_at(self.me.x, self.me.y - 1)
-        monster__0__1 = valid__0__1 and wrld.monsters_at(self.me.x, self.me.y - 1)
+        danger__0__1 = self.danger(wrld, self.me.x, self.me.y - 1)
+
+        # (0, 0)
+        danger__0__0 = self.danger(wrld, self.me.x, self.me.y)
 
         # (0, 1)
         valid__0_1 = self.Test.valid_spot(wrld, self.me.x, self.me.y + 1)
         empty__0_1 = valid__0_1 and wrld.empty_at(self.me.x, self.me.y + 1)
         wall__0_1 = valid__0_1 and wrld.wall_at(self.me.x, self.me.y + 1)
-        explosion__0_1 = valid__0_1 and wrld.explosion_at(self.me.x, self.me.y + 1)
-        monster__0_1 = valid__0_1 and wrld.monsters_at(self.me.x, self.me.y + 1)
+        danger__0_1 = self.danger(wrld, self.me.x, self.me.y + 1)
 
         # (1, -1)
         valid_1__1 = self.Test.valid_spot(wrld, self.me.x + 1, self.me.y - 1)
         empty_1__1 = valid_1__1 and wrld.empty_at(self.me.x + 1, self.me.y - 1)
         wall_1__1 = valid_1__1 and wrld.wall_at(self.me.x + 1, self.me.y - 1)
-        bomb_1__1 = valid_1__1 and wrld.bomb_at(self.me.x + 1, self.me.y - 1)
-        explosion_1__1 = valid_1__1 and wrld.explosion_at(self.me.x + 1, self.me.y - 1)
-        monster_1__1 = valid_1__1 and wrld.monsters_at(self.me.x + 1, self.me.y - 1)
+        danger_1__1 = self.danger(wrld, self.me.x + 1, self.me.y - 1)
 
         # (1, 0)
         valid_1__0 = self.Test.valid_spot(wrld, self.me.x + 1, self.me.y)
         empty_1__0 = valid_1__0 and wrld.empty_at(self.me.x + 1, self.me.y)
         wall_1__0 = valid_1__0 and wrld.wall_at(self.me.x + 1, self.me.y)
-        explosion_1__0 = valid_1__0 and wrld.explosion_at(self.me.x + 1, self.me.y)
-        monster_1__0 = valid_1__0 and wrld.monsters_at(self.me.x + 1, self.me.y)
+        danger_1__0 = self.danger(wrld, self.me.x + 1, self.me.y)
 
         # (1, 1)
         valid_1_1 = self.Test.valid_spot(wrld, self.me.x + 1, self.me.y + 1)
         empty_1_1 = valid_1_1 and wrld.empty_at(self.me.x + 1, self.me.y + 1)
         wall_1_1 = valid_1_1 and wrld.wall_at(self.me.x + 1, self.me.y + 1)
-        bomb_1_1 = valid_1_1 and wrld.bomb_at(self.me.x + 1, self.me.y + 1)
-        explosion_1_1 = valid_1_1 and wrld.explosion_at(self.me.x + 1, self.me.y + 1)
-        monster_1_1 = valid_1_1 and wrld.monsters_at(self.me.x + 1, self.me.y + 1)
+        danger_1_1 = self.danger(wrld, self.me.x + 1, self.me.y + 1)
 
         exit = TestCharacter.get_exit(self.Test, wrld)
         exitdx = exit[0] - self.me.x
@@ -207,61 +210,55 @@ class Agent(CharacterEntity):
         else:
             bombx, bomby = 0, 0
 
+        distance_to_exit = np.sqrt(abs(exitdx) + abs(exitdy))
+
         state = [
             # (-1, -1)
             empty__1__1,
             wall__1__1,
-            bomb__1__1,
-            explosion__1__1,
-            monster__1__1,
+            danger__1__1,
 
             # (-1, 0)
             empty__1__0,
             wall__1__0,
-            explosion__1__0,
-            monster__1__0,
+            danger__1__0,
 
             # (-1, 1)
             empty__1_1,
             wall__1_1,
-            bomb__1_1,
-            explosion__1_1,
-            monster__1_1,
+            danger__1_1,
+
+            # (0, 0)
+            danger__0__0,
 
             # (0, -1)
             empty__0__1,
             wall__0__1,
-            explosion__0__1,
-            monster__0__1,
+            danger__0__1,
 
             # (0, 1)
             empty__0_1,
             wall__0_1,
-            explosion__0_1,
-            monster__0_1,
+            danger__0_1,
 
             # (1, -1)
             empty_1__1,
             wall_1__1,
-            bomb_1__1,
-            explosion_1__1,
-            monster_1__1,
+            danger_1__1,
 
             # (1, 0)
             empty_1__0,
             wall_1__0,
-            explosion_1__0,
-            monster_1__0,
+            danger_1__0,
 
             # (1, 1)
             empty_1_1,
             wall_1_1,
-            bomb_1_1,
-            explosion_1_1,
-            monster_1_1,
+            danger_1_1,
 
             exitdx,
             exitdy,
+            distance_to_exit,
             astarx,
             astary,
             pathToExit,
@@ -323,28 +320,32 @@ class Agent(CharacterEntity):
 
     def get_action(self, state):
         # random moves: tradeoff exploration / exploitation
-        self.epsilon = 80 - self.n_games
-        final_move = [0,0,0]
+        self.epsilon = max(10, 80 - self.n_games)
+        final_move = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # Initialize a list of zeros for the final move
         if random.randint(0,200) < self.epsilon:
-            move = random.randint(0,2)
-            final_move[0] = random.randint(-1,1)
-            final_move[1] = random.randint(-1,1)
-            if random.randint(0,4000) < self.epsilon:
-                final_move[2] = 1
+            move = random.randint(0,9)
+            final_move[move] = 1
+            #if random.randint(0,4000) < self.epsilon:
+            #    final_move[8] = 1
 
         else:
             state0 = torch.tensor(state, dtype=torch.float)
-            prediction = self.model(state0)
-            move = torch.argmax(prediction).item()
+            with torch.no_grad():
+                prediction = self.model(state0)
+            # The three outputs control horizontal movement, vertical
+            # movement, and bomb placement respectively.
+            
+            move = prediction.argmax().item()
             final_move[move] = 1
+
+        moves = [(-1, -1, 0), (0, -1, 0), (1, -1, 0), (-1,  0, 0), (0,  0, 0), (1,  0, 0), (-1,  1, 0), (0,  1, 0), (1,  1, 0), (0,  0, 1)]
+        final_move = moves[final_move.index(1)]
 
         bomb_list = list(self.world.bombs.values())
         monster_list = list(self.world.monsters.values())
         path = TestCharacter.astar_path_to_exit(self.Test, self.world, self.start, self.goal)
-        if bomb_list or:
-            final_move[2] = 0
-        elif not monster_list or path:
-            final_move[2] = 0
+        #if bomb_list or (not monster_list or not path):
+            #final_move[8] = 0
 
         return final_move
 
@@ -353,17 +354,13 @@ class Agent(CharacterEntity):
             self.place_bomb()
 
         self.move(action[0], action[1])
-    
-    def train(self, wrld):
-        # do() calls this once per world step, so keep the game and statistics
-        # on this agent rather than starting an unbounded loop on each call.
-        state_old = self.get_state(wrld)
-        final_move = self.get_action(state_old)
-        self.do_action(final_move)
+
+    def scoring(self, wrld, action):
         score = wrld.scores["me"]
-        
-        # Use the sensed world to evaluate the immediate outcome of this move.
-        _, events = SensedWorld.from_world(wrld).next()
+        next_wrld = SensedWorld.from_world(wrld)
+        next_wrld.me = next_wrld.me(self)
+        next_wrld.me.move(action[0], action[1])
+        next_wrld, events = next_wrld.next()
         reward = -1
         game_over = False
 
@@ -380,26 +377,99 @@ class Agent(CharacterEntity):
             elif event.tpe == Event.BOMB_HIT_WALL:
                 reward += 5
 
-        
-        state_new = self.get_state(wrld)
+        state_new = self.get_state(next_wrld)
+        return state_new, reward, score, game_over
 
-        self.train_short_memory(state_old, final_move, reward, state_new, game_over)
-        self.remember(state_old, final_move, reward, state_new, game_over)
+    def game_over(self, score):
+        self.n_games += 1
+        self.train_long_memory()
+        
+        if score > self._record:
+            self._record = score
+            self.model.save()
+                        
+        print('Game', self.n_games, 'Score', score, 'Record', self._record)
+        self._plot_scores.append(score)
+        self._total_score += score
+        self._plot_mean_scores.append(self._total_score / self.n_games)
+        self._save_training_state()
+        plot(self._plot_scores, self._plot_mean_scores)
+    
+    def trainself(self, wrld):
+        state_old = self.get_state(wrld)
+        action = self.get_action(state_old)
+        self.do_action(action)
+        state_new, reward, score, game_over = self.scoring(wrld, action)
+
+        self.train_short_memory(state_old, action, reward, state_new, game_over)
+        self.remember(state_old, action, reward, state_new, game_over)
 
         if game_over:
-            self.n_games += 1
-            self.train_long_memory()
+            self.game_over(score)
 
-            if score > self._record:
-                self._record = score
-                self.model.save()
-                
-            print('Game', self.n_games, 'Score', score, 'Record', self._record)
-            self._plot_scores.append(score)
-            self._total_score += score
-            self._plot_mean_scores.append(self._total_score / self.n_games)
-            self._save_training_state()
-            plot(self._plot_scores, self._plot_mean_scores)
+    def trainguided(self, wrld):
+        
+        state_old = self.get_state(wrld)
+        dx, dy = 0, 0
+        bomb = False
+
+        # Handle input
+        inp = self.bankedGames[self.guide_game][self.guided_turn]
+        for c in inp:
+            if 'w' == c:
+                dy -= 1
+            if 'a' == c:
+                dx -= 1
+            if 's' == c:
+                dy += 1
+            if 'd' == c:
+                dx += 1
+            if 'b' == c:
+                bomb = True
+        self.move(dx, dy)
+        #print(f"Guided move: {inp} -> dx: {dx}, dy: {dy}, bomb: {bomb}")
+            
+        if bomb:
+            self.place_bomb()
+        action = (dx, dy, 1 if bomb else 0)
+        state_new, reward, score, game_over = self.scoring(wrld, action)
+
+        self.train_short_memory(state_old, action, reward, state_new, game_over)
+        self.remember(state_old, action, reward, state_new, game_over)
+        self.guided_turn += 1
+
+        if game_over:
+            self.game_over(score)
+            self.guide_game += 1
+
+        # Commands
+
+    def recordguided(self, wrld):   
+        dx, dy = 0, 0
+        bomb = False
+        inp = input("How would you like to move (w=up,a=left,s=down,d=right,b=bomb)?")   
+        for c in inp:
+            if 'w' == c:
+                dy -= 1
+            if 'a' == c:
+                dx -= 1
+            if 's' == c:
+                dy += 1
+            if 'd' == c:
+                dx += 1
+            if 'b' == c:
+                bomb = True
+        self.move(dx, dy)
+
+        if bomb:
+            self.place_bomb()
+
+        action = (dx, dy, 1 if bomb else 0)
+        state_new, reward, score, game_over = self.scoring(wrld, action)
+        self.guide_string = self.guide_string + inp
+
+        if game_over:
+            print(self.guide_string)
 
     def do(self, wrld):
         self.world = wrld
@@ -410,8 +480,19 @@ class Agent(CharacterEntity):
         if os.path.isfile(model_file):
             self.model.load()
 
-        if self.training:
-            self.train(wrld)
+        if self.training == 1:
+            if (random.randint(0, 100) < 10):
+                self.training = 2
+            else:
+                self.training = 4
+
+        if self.training == 4:
+            self.trainself(wrld)
+        elif self.training == 2:
+            self.trainguided(wrld)
+        elif self.training == 3:
+            self.recordguided(wrld)
         else:
             state_old = self.get_state(wrld)
-            self.action(state_old)
+            action = self.get_action(state_old)
+            self.do_action(action)
