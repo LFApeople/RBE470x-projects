@@ -7,35 +7,28 @@ sys.path.insert(1, '..')
 from game import Game
 
 sys.path.insert(1, '../teamNN')
-from testcharacter import TestCharacter
 from neuralnet import Agent
 
-DRILL = "fence"
-
+map_file = 'map.txt'
+DRILL = sys.argv[1]
+input_mode = int(sys.argv[2])
 # Drill selection
 match DRILL:
     case "fence": # Short wall to bomb across
-        map_file = 'map.txt'
+        map_file = 'fence_map.txt'
 
-epoch = 0
-
-# Create the game
-while epoch < 1000:
+# Keep one agent across episodes so replay memory and optimizer state survive.
+agent = Agent("me", "C", 0, 0, mode=input_mode)
+for epoch in range(1000):
     g = Game.fromfile(map_file)
-    g = Game.fromfile('map.txt')
-
-    # TODO Add your character
-    """ g.add_character(TestCharacter("me", # name
-                                  "C",  # avatar
-                                  0, 0  # position
-    )) """
-
-    g.add_character(Agent("me", # name
-                                  "C",  # avatar
-                                  0, 0,  # position
-                                  2
-    ))
+    agent.training = input_mode
+    agent.guided_turn = 0
+    agent.x = 0
+    agent.y = 0
+    agent.dx = 0
+    agent.dy = 0
+    agent.maybe_place_bomb = False
+    g.add_character(agent)
 
     # Run!
     g.go(1)
-    g = None

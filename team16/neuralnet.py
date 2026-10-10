@@ -10,7 +10,7 @@ from entity import CharacterEntity
 from sensed_world import SensedWorld
 from events import Event
 import numpy as np
-from model import Linear_QNet, QTrainer
+from model import DEVICE, Linear_QNet, QTrainer
 import matplotlib.pyplot as plt
 
 plt.ion()
@@ -78,10 +78,14 @@ def plot(scores, mean_scores, title='Training...', save_path=None):
 
 
 MAX_MEMORY = 100_000
-BATCH_SIZE = 1000
+BATCH_SIZE = 256
 LR = 0.001
-device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
-torch.set_default_device(torch.device(device))
+ACTION_SPACE = (
+    (-1, -1, 0), (0, -1, 0), (1, -1, 0),
+    (-1, 0, 0), (0, 0, 0), (1, 0, 0),
+    (-1, 1, 0), (0, 1, 0), (1, 1, 0),
+    (0, 0, 1),
+)
 
 class Agent(CharacterEntity):
     
@@ -92,7 +96,10 @@ class Agent(CharacterEntity):
         self.epsilon = 0 # randomness
         self.gamma = 0.9 # discount rate
         self.memory = deque(maxlen=MAX_MEMORY) # popleft()
-        self.model = Linear_QNet(33, 256, 10)
+        self.model = Linear_QNet(34, 256, len(ACTION_SPACE)).to(DEVICE)
+        model_file = os.path.join(self.model.model_folder_path, 'model.pth')
+        if os.path.isfile(model_file):
+            self.model.load()
         self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
         self.training = mode # 0 = no training, 1 = self-training, 2 = guided training, 3 = teaching
         self._plot_scores = []
@@ -207,8 +214,9 @@ class Agent(CharacterEntity):
         bomb_list = list(wrld.bombs.values())
         if bomb_list:
             bombx, bomby = self.me.x == bomb_list[0].x, self.me.y == bomb_list[0].y
+            bomb = 1
         else:
-            bombx, bomby = 0, 0
+            bombx, bomby, bomb = 0, 0, 0
 
         distance_to_exit = np.sqrt(abs(exitdx) + abs(exitdy))
 
@@ -265,6 +273,7 @@ class Agent(CharacterEntity):
 
             bombx,
             bomby,
+            bomb
         ]
 
         state = [self._normalize_state_value(v) for v in state]
@@ -306,10 +315,9 @@ class Agent(CharacterEntity):
             json.dump(state, f)
 
     def train_long_memory(self):
-        if len(self.memory) > BATCH_SIZE:
-            mini_sample = random.sample(self.memory, BATCH_SIZE)
-        else:
-            mini_sample = self.memory
+        if not self.memory:
+            return
+        mini_sample = random.sample(self.memory, min(BATCH_SIZE, len(self.memory)))
 
         states, actions, rewards, next_states, game_overs = zip(*mini_sample)
         self.trainer.train_step(states, actions, rewards, next_states, game_overs)
@@ -319,35 +327,20 @@ class Agent(CharacterEntity):
         self.trainer.train_step(state, action, reward, next_state, game_over)
 
     def get_action(self, state):
-        # random moves: tradeoff exploration / exploitation
-        self.epsilon = max(10, 80 - self.n_games)
-        final_move = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0]  # Initialize a list of zeros for the final move
-        if random.randint(0,200) < self.epsilon:
-            move = random.randint(0,9)
-            final_move[move] = 1
-            #if random.randint(0,4000) < self.epsilon:
-            #    final_move[8] = 1
+        return ACTION_SPACE[self._get_action_index(state)]
 
+    def _get_action_index(self, state):
+        if self.training == 4:
+            self.epsilon = max(0.05, 0.40 * (0.995 ** self.n_games))
+            if random.random() < self.epsilon:
+                return random.randrange(len(ACTION_SPACE))
         else:
-            state0 = torch.tensor(state, dtype=torch.float)
-            with torch.no_grad():
-                prediction = self.model(state0)
-            # The three outputs control horizontal movement, vertical
-            # movement, and bomb placement respectively.
-            
-            move = prediction.argmax().item()
-            final_move[move] = 1
+            self.epsilon = 0.0
 
-        moves = [(-1, -1, 0), (0, -1, 0), (1, -1, 0), (-1,  0, 0), (0,  0, 0), (1,  0, 0), (-1,  1, 0), (0,  1, 0), (1,  1, 0), (0,  0, 1)]
-        final_move = moves[final_move.index(1)]
-
-        bomb_list = list(self.world.bombs.values())
-        monster_list = list(self.world.monsters.values())
-        path = TestCharacter.astar_path_to_exit(self.Test, self.world, self.start, self.goal)
-        #if bomb_list or (not monster_list or not path):
-            #final_move[8] = 0
-
-        return final_move
+        state_tensor = torch.as_tensor(state, dtype=torch.float32, device=DEVICE)
+        self.model.eval()
+        with torch.no_grad():
+            return int(self.model(state_tensor).argmax().item())
 
     def do_action(self, action):
         if action[2]:
@@ -397,12 +390,13 @@ class Agent(CharacterEntity):
     
     def trainself(self, wrld):
         state_old = self.get_state(wrld)
-        action = self.get_action(state_old)
+        action_idx = self._get_action_index(state_old)
+        action = ACTION_SPACE[action_idx]
         self.do_action(action)
         state_new, reward, score, game_over = self.scoring(wrld, action)
 
-        self.train_short_memory(state_old, action, reward, state_new, game_over)
-        self.remember(state_old, action, reward, state_new, game_over)
+        self.train_short_memory(state_old, action_idx, reward, state_new, game_over)
+        self.remember(state_old, action_idx, reward, state_new, game_over)
 
         if game_over:
             self.game_over(score)
@@ -432,15 +426,20 @@ class Agent(CharacterEntity):
         if bomb:
             self.place_bomb()
         action = (dx, dy, 1 if bomb else 0)
+        action_idx = ACTION_SPACE.index(action)
         state_new, reward, score, game_over = self.scoring(wrld, action)
 
-        self.train_short_memory(state_old, action, reward, state_new, game_over)
-        self.remember(state_old, action, reward, state_new, game_over)
+        self.train_short_memory(state_old, action_idx, reward, state_new, game_over)
+        self.remember(state_old, action_idx, reward, state_new, game_over)
         self.guided_turn += 1
 
         if game_over:
             self.game_over(score)
-            self.guide_game += 1
+            self.guide_game = (self.guide_game + 1) % len(self.bankedGames)
+            self.guided_turn = 0
+        elif self.guided_turn >= len(self.bankedGames[self.guide_game]):
+            self.guide_game = (self.guide_game + 1) % len(self.bankedGames)
+            self.guided_turn = 0
 
         # Commands
 
@@ -476,9 +475,6 @@ class Agent(CharacterEntity):
         self.me = wrld.me(self)
         self.start = (self.me.x, self.me.y)
         self.goal = TestCharacter.get_exit(self.Test, wrld)
-        model_file = os.path.join(self.model.model_folder_path, 'model.pth')
-        if os.path.isfile(model_file):
-            self.model.load()
 
         if self.training == 1:
             if (random.randint(0, 100) < 10):
