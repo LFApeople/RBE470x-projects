@@ -804,6 +804,7 @@ class TestCharacter(CharacterEntity):
 
     # Primary function called by the game each turn
     def do(self, wrld):
+        print("Hi" + str(wrld.scores["me"]))
         me = wrld.me(self)
         start = (me.x, me.y)
         goal = self.get_exit(wrld)

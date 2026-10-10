@@ -3,6 +3,9 @@ import sys
 sys.path.insert(0, '../bomberman')
 # Import necessary stuff
 from entity import CharacterEntity
+from sensed_world import SensedWorld
+from events import Event
+from entity import CharacterEntity
 from colorama import Fore, Back
 
 class InteractiveCharacter(CharacterEntity):
@@ -24,6 +27,16 @@ class InteractiveCharacter(CharacterEntity):
             if 'b' == c:
                 bomb = True
         # Execute commands
+        next_wrld = SensedWorld.from_world(wrld)
+        next_wrld.me = next_wrld.me(self)
+        next_wrld.me.move(dx, dy)
         self.move(dx, dy)
+        bomb_list = list(wrld.bombs.values())
+        _, events = next_wrld.next()
+        print(events)
+        print(wrld.events)
+        if bomb_list:
+            print(bomb_list[0].x, bomb_list[0].y)
+            
         if bomb:
             self.place_bomb()
