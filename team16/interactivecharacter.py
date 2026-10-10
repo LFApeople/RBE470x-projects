@@ -25,5 +25,9 @@ class InteractiveCharacter(CharacterEntity):
                 bomb = True
         # Execute commands
         self.move(dx, dy)
+        bomb_list = list(wrld.bombs.values())
+        if bomb_list:
+            print(bomb_list[0].x, bomb_list[0].y)
+            
         if bomb:
             self.place_bomb()
