@@ -92,20 +92,6 @@ class TestCharacter(CharacterEntity):
             elif event.tpe == Event.BOMB_HIT_MONSTER:
                 reward += 2.0
         return reward
-
-
-    def features(self, wrld, pos, goal):
-            f_exit = 1.0 / (1 + self.exit_distance(wrld, pos, goal))
-    
-            m_d = [max(abs(pos[0] - m.x), abs(pos[1] - m.y))
-                    for ms in wrld.monsters.values() for m in ms]
-            f_monster = 1.0 / (1 + min(m_d)) if m_d else 0.0
-    
-            b_d = [abs(pos[0] - b.x) + abs(pos[1] - b.y)
-                    for bs in wrld.bombs.values() for b in bs]
-            f_bomb = 1.0 / (1 + min(b_d)) if b_d else 0.0
-    
-            return [f_exit, f_monster, f_bomb]
     
     def Q_value(self, features):
         return sum(self.weights[name] * features.get(name, 0.0) for name in self.FEATURE_NAMES)
@@ -120,64 +106,36 @@ class TestCharacter(CharacterEntity):
             self.weights[name] += self.ALPHA * td_error * self.previous_features.get(name, 0.0)
         self._save_weights()
 
-    def features(self, wrld, start, destination, goal, blast_time=None):
-            """Normalized state-action features for one candidate destination."""
-            if blast_time is None:
-                blast_time, _ = self.build_danger(wrld)
-    
-            distance_before = self.exit_distance(start, goal)
-            distance_after = self.exit_distance(destination, goal)
-            progress = max(-1.0, min(1.0, distance_before - distance_after))
-    
-            monsters = self.monster_list(wrld)
-            nearest = 1.0
-            adjacent = 0.0
-            for monster in monsters:
-                distance = max(abs(destination[0] - monster.x),
-                               abs(destination[1] - monster.y))
-                nearest = min(nearest, min(distance / 5.0, 1.0))
-                if distance <= 1:
-                    adjacent += 1.0
-    
-            safe_neighbors = sum(
-                1 for pos in self.get_neighbors(wrld, destination)
-                if pos not in blast_time
-            )
-    
-            # Blast windows come from build_danger (bomb timers + live explosions)
-            windows = blast_time.get(destination, [])
-            bomb_danger = 1.0 if windows else 0.0
-            explosion_danger = 1.0 if any(s <= 1 < e for s, e in windows) else 0.0
-    
-            return {
-                "bias": 1.0,
-                "progress": progress,
-                "monster_d": 1.0 - nearest if monsters else 0.0,
-                "adjacent_monsters": min(adjacent, 3.0),
-                "safe_neighbors": min(safe_neighbors / 8.0, 1.0),
-                "bomb_d": bomb_danger,
-                "explosion_d": explosion_danger,
-                "exit": 1.0 if destination == goal else 0.0,
-            }
-
-    # Evaluate every legal move from pos -> list of (q, (dx, dy), feats)
-    def action_values(self, wrld, pos, goal):
-        results = []
-        for dx, dy in self.moves:
-            p = (pos[0] + dx, pos[1] + dy)
-            if (dx, dy) == (0, 0) or self.valid_spot(wrld, *p):
-                feats = self.features(wrld, p, goal)
-                results.append((self.q_value(feats), (dx, dy), feats))
-        return results
-
-    def reward(self, wrld, pos, goal):
-        dist = self.exit_distance(wrld, pos, goal)
-        r = (self.prev_exit_dist - dist) if self.prev_exit_dist is not None else 0
-        if self.get_neighbors_monsters(wrld, pos):
-            r -= 5          # adjacent to a monster
-        if pos == goal:
-            r += 100
-        return r, dist
+    def features(self, wrld, start, destination, goal):
+        distance_before = self.exitdistance(start, goal)
+        distance_after = self.exitdistance(destination, goal)
+        progress = max(-1.0, min(1.0, distance_before - distance_after))
+        monsters = self.monsters(wrld)
+        nearest = 1.0
+        adjacent = 0.0
+        for monster in monsters:
+            distance = max(abs(destination[0] - monster.x),
+                           abs(destination[1] - monster.y))
+            nearest = min(nearest, min(distance / 5.0, 1.0))
+            if distance <= 1:
+                adjacent += 1.0
+        safe_neighbors = sum(
+            1 for pos in self.neighbors(wrld, destination)
+            if not wrld.bomb_at(pos[0], pos[1])
+            and not wrld.explosion_at(pos[0], pos[1])
+        )
+        bomb_danger = 1.0 if wrld.bomb_at(*destination) else 0.0
+        explosion_danger = 1.0 if wrld.explosion_at(*destination) else 0.0
+        return {
+            "bias": 1.0,
+            "progress": progress,
+            "monster_d": 1.0 - nearest if monsters else 0.0,
+            "adj_monsters": min(adjacent, 3.0),
+            "safe_neighbors": min(safe_neighbors / 8.0, 1.0),
+            "bomb_d": bomb_danger,
+            "explosion_d": explosion_danger,
+            "exit": 1.0 if destination == goal else 0.0,
+        }
 
     def in_bounds(self, wrld, x, y):
         return 0 <= x < wrld.width() and 0 <= y < wrld.height()
@@ -210,106 +168,6 @@ class TestCharacter(CharacterEntity):
                 if wrld.monsters_at(nx, ny):
                     monsters.append(((nx, ny), 1))
         return monsters
-
-    # Find what cells an explosion will affect
-    def blast_cells(self, wrld, bx, by):
-        """Cells a bomb at (bx, by) will hit (stops at walls)."""
-        rng = getattr(wrld, "expl_range", 4)
-        cells = {(bx, by)}
-        for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
-            for i in range(1, rng + 1):
-                x, y = bx + dx * i, by + dy * i
-                if not self.in_bounds(wrld, x, y) or wrld.wall_at(x, y):
-                    break
-                cells.add((x, y))
-        return cells
-
-    #helper funtion for finding the damger of cells
-
-    def build_danger(self, wrld):
-        """
-        Returns:
-          blast_time: {cell: [(start_tick, end_tick), ...]} windows when cell is deadly
-          monsters:   list of (x, y)
-        """
-        duration = getattr(wrld, "expl_duration", 2)
-        blast_time = {}
-
-        for bomb in wrld.bombs.values():
-            for cell in self.blast_cells(wrld, bomb.x, bomb.y):
-                blast_time.setdefault(cell, []).append(
-                    (bomb.timer, bomb.timer + duration))
-
-        for expl in wrld.explosions.values():
-            blast_time.setdefault((expl.x, expl.y), []).append((0, expl.timer))
-
-        monsters = [(m.x, m.y) for m in self.monster_list(wrld)]
-        return blast_time, monsters
-
-    def cell_deadly(self, cell, t, blast_time, monsters):
-        for start, end in blast_time.get(cell, []):
-            if start <= t < end:
-                return True
-        radius = 1 + int(self.safety_margin)
-        for mx, my in monsters:
-            if max(abs(cell[0] - mx), abs(cell[1] - my)) <= radius:
-                return True
-        return False
-
-    def is_threatened(self, wrld, pos, horizon=4):
-        """True if standing still at pos gets you hurt within `horizon` ticks."""
-        blast_time, monsters = self.build_danger(wrld)
-        return any(self.cell_deadly(pos, t, blast_time, monsters)
-                    for t in range(horizon + 1))
-    
-        # Escape move to avoid danger (not wired into choose_move yet)
-    def escape_move(self, wrld, start, max_steps=10):
-        """
-        BFS over (cell, tick). Finds the shortest sequence of moves to a cell
-        that is out of every blast zone and away from monsters.
-        Returns (dx, dy), or None if already safe / nothing reachable.
-        """
-        blast_time, monsters = self.build_danger(wrld)
-
-        def passable(x, y):
-            return (self.in_bounds(wrld, x, y)
-                    and not wrld.wall_at(x, y)
-                    and not wrld.bombs_at(x, y))
-
-        def permanently_safe(cell):
-            if cell in blast_time:
-                return False
-            return not self.cell_deadly(cell, 0, {}, monsters)
-
-        if permanently_safe(start) and not self.is_threatened(wrld, start):
-            return None
-
-        queue = deque([(start, 0, None)])
-        seen = {(start, 0)}
-        fallback = None
-
-        while queue:
-            (x, y), t, first = queue.popleft()
-
-            if first is not None and permanently_safe((x, y)):
-                return first
-            if t >= max_steps:
-                continue
-
-            for dx, dy in self.MOVES + [(0, 0)]:   # (0, 0) = wait
-                nx, ny = x + dx, y + dy
-                nt = t + 1
-                if not passable(nx, ny) or ((nx, ny), nt) in seen:
-                    continue
-                if self.cell_deadly((nx, ny), nt, blast_time, monsters):
-                    continue
-                seen.add(((nx, ny), nt))
-                move = first if first is not None else (dx, dy)
-                if fallback is None and nt >= 3:
-                    fallback = move
-                queue.append(((nx, ny), nt, move))
-
-        return fallback
 
     # Primary golden path to exit with Astar
     def astar_path_to_exit(self, wrld, start, goal):
