@@ -187,6 +187,20 @@ class TestCharacter(CharacterEntity):
     def monster_list(self, wrld):
         return [m for cells in wrld.monsters.values() for m in cells]
 
+    def trapped_monsters(self, wrld):
+        """Return monsters with at most one adjacent, non-wall escape route."""
+        trapped = []
+        for monster in self.monster_list(wrld):
+            escape_routes = sum(
+                (dx != 0 or dy != 0)
+                and self.in_bounds(wrld, monster.x + dx, monster.y + dy)
+                and not wrld.wall_at(monster.x + dx, monster.y + dy)
+                for dx, dy in self.MOVES
+            )
+            if escape_routes <= 1:
+                trapped.append(monster)
+        return trapped
+
     def me_from_world(self, wrld):
         for cells in wrld.characters.values():
             for character in cells:
@@ -198,13 +212,15 @@ class TestCharacter(CharacterEntity):
     # Danger helpers (explosions)
     # ------------------------------------------------------------------
     def blast_cells(self, wrld, bx, by):
-        """Cells a bomb at (bx, by) will hit (stops at walls)."""
+        """Cells hit by a bomb, stopping at walls, exits, and other bombs."""
         rng = getattr(wrld, "expl_range", 4)
         cells = {(bx, by)}
         for dx, dy in [(1, 0), (-1, 0), (0, 1), (0, -1)]:
             for i in range(1, rng + 1):
                 x, y = bx + dx * i, by + dy * i
                 if not self.in_bounds(wrld, x, y) or wrld.wall_at(x, y):
+                    break
+                if wrld.exit_at(x, y) or wrld.bomb_at(x, y):
                     break
                 cells.add((x, y))
         return cells
@@ -583,10 +599,34 @@ class TestCharacter(CharacterEntity):
                 x, y = bx + dx * i, by + dy * i
                 if not self.in_bounds(wrld, x, y):
                     break
+                if wrld.exit_at(x, y) or wrld.bomb_at(x, y):
+                    break
                 if wrld.wall_at(x, y):
                     hit.add((x, y))
                     break
         return hit
+
+    def _reachable_open_cells(self, wrld, start, removed_walls=()):
+        """Return open map cells reachable from start, treating removed walls as open."""
+        removed_walls = set(removed_walls)
+        if not self.in_bounds(wrld, *start):
+            return set()
+
+        reachable = {start}
+        visited = {start}
+        queue = deque([start])
+        while queue:
+            x, y = queue.popleft()
+            for dx, dy in self.MOVES:
+                nxt = (x + dx, y + dy)
+                if (nxt in visited or not self.in_bounds(wrld, *nxt)
+                        or (wrld.wall_at(*nxt) and nxt not in removed_walls)):
+                    continue
+                visited.add(nxt)
+                if not wrld.wall_at(*nxt):
+                    reachable.add(nxt)
+                queue.append(nxt)
+        return reachable
 
     def astar_through_walls(self, wrld, start, goal, wall_cost=6):
         """A* that may cross walls at extra cost, to see which walls to blow up."""
@@ -623,12 +663,13 @@ class TestCharacter(CharacterEntity):
         path.reverse()
         return path
 
-    def breach_move(self, wrld, start, goal):
+    def breach_move(self, wrld, start, goal, wall_cost=1):
         """
-        When walls cut off the exit: return the next cell on the way to a spot
-        from which a bomb opens the route (or `start` if already at such a spot).
+        Return the next cell toward a safe bomb site on the preferred route.
         """
-        wpath = self.astar_through_walls(wrld, start, goal)
+        wpath = self.astar_through_walls(
+            wrld, start, goal, wall_cost=wall_cost
+        )
         first_wall = next((c for c in wpath if wrld.wall_at(*c)), None)
         if first_wall is None:
             return None
@@ -640,9 +681,11 @@ class TestCharacter(CharacterEntity):
                 site = (first_wall[0] + dx * i, first_wall[1] + dy * i)
                 if not self.in_bounds(wrld, *site) or wrld.wall_at(*site):
                     break
-                if site == start:
-                    return start
-                if not self.valid_spot(wrld, *site):
+                if first_wall not in self.walls_hit(wrld, *site):
+                    continue
+                if site != start and not self.valid_spot(wrld, *site):
+                    continue
+                if self.bomb_escape_move(wrld, site) is None:
                     continue
                 path = self.astar(wrld, start, site)
                 if path and (best is None or len(path) < len(best)):
@@ -701,19 +744,42 @@ class TestCharacter(CharacterEntity):
             return None
 
         useful = False
+        monsters = self.monster_list(wrld)
 
         # 1. A monster is close and in the blast lines
         blast = self.blast_cells(wrld, *start)
-        for m in self.monster_list(wrld):
+        trapped_positions = {
+            (monster.x, monster.y) for monster in self.trapped_monsters(wrld)
+        }
+        for m in monsters:
             if ((m.x, m.y) in blast
-                    and max(abs(m.x - start[0]), abs(m.y - start[1])) <= 3):
+                    and (max(abs(m.x - start[0]), abs(m.y - start[1])) <= 3
+                         or (m.x, m.y) in trapped_positions)):
                 useful = True
 
-        # 2. Walls cut off the exit and this bomb breaks one on the route
+        # 2. A destroyed wall makes additional open cells reachable.
+        walls = self.walls_hit(wrld, *start)
+        if not useful and walls:
+            before = self._reachable_open_cells(wrld, start)
+            after = self._reachable_open_cells(wrld, start, walls)
+            useful = bool(after - before)
+
+        # 3. With no monsters, break walls on the preferred exit route even
+        # when a longer route around them is already open.
+        if not useful:
+            wpath = self.astar_through_walls(
+                wrld, start, goal,
+                wall_cost=1 if not monsters else 6,
+            )
+            route_walls = {c for c in wpath if wrld.wall_at(*c)}
+            if route_walls & walls and not monsters:
+                useful = True
+
+        # 4. Walls cut off the exit and this bomb breaks one on the route.
         if not useful and not self.astar(wrld, start, goal):
             wpath = self.astar_through_walls(wrld, start, goal)
             route_walls = {c for c in wpath if wrld.wall_at(*c)}
-            if route_walls & self.walls_hit(wrld, *start):
+            if route_walls & walls:
                 useful = True
 
         if not useful:

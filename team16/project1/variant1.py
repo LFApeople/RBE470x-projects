@@ -13,7 +13,7 @@ sys.path.insert(1, '../teamNN')
 #from testcharacter import TestCharacter
 
 # Uncomment this if you want the interactive character
-from interactivecharacter import InteractiveCharacter
+from team16.interactivecharacter import InteractiveCharacter
 
 # Create the game
 g = Game.fromfile('map.txt')

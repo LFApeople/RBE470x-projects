@@ -82,6 +82,7 @@ def plot(scores, mean_scores, title='Training...', save_path=None):
 MAX_MEMORY = 100_000
 BATCH_SIZE = 256
 LR = 0.001
+PROGRESS_REWARD = 1.0
 ACTION_SPACE = (
     (-1, -1, 0), (0, -1, 0), (1, -1, 0),
     (-1, 0, 0), (0, 0, 0), (1, 0, 0),
@@ -103,7 +104,7 @@ class Agent(CharacterEntity):
         if os.path.isfile(model_file):
             self.model.load()
         self.trainer = QTrainer(self.model, lr=LR, gamma=self.gamma)
-        self.training = mode # 0 = no training, 1 = self-training, 2 = guided training, 3 = teaching
+        self.training = mode # 0 = evaluation, 1 = mixed training, 2 = guided, 3 = teaching, 4 = self-training
         self._plot_scores = []
         self._plot_mean_scores = []
         self._total_score = 0
@@ -140,58 +141,54 @@ class Agent(CharacterEntity):
     def danger(self, wrld, x, y):
         if not self.Test.valid_spot(wrld, x, y):
             return 1
-        if wrld.explosion_at(x, y):
-            return 1
-        if wrld.monsters_at(x, y):
-            return 1
-        if wrld.bomb_at(x, y):
-            return 1
-        if any(self._bomb_threatens(wrld, bomb, x, y) for bomb in wrld.bombs.values()):
-            return 1
-        return 0
+        return int(self.Test.is_threatened(wrld, (x, y)))
 
     def _bomb_threatens(self, wrld, bomb, x, y):
-        if (x, y) == (bomb.x, bomb.y):
-            return True
-
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            for distance in range(1, wrld.expl_range + 1):
-                blast_x = bomb.x + dx * distance
-                blast_y = bomb.y + dy * distance
-                if not (0 <= blast_x < wrld.width() and 0 <= blast_y < wrld.height()):
-                    break
-                if wrld.wall_at(blast_x, blast_y):
-                    break
-                if wrld.exit_at(blast_x, blast_y) or wrld.bomb_at(blast_x, blast_y):
-                    break
-                if (blast_x, blast_y) == (x, y):
-                    return True
-        return False
+        return (x, y) in self.Test.blast_cells(wrld, bomb.x, bomb.y)
 
     def _can_escape_bomb(self, wrld):
         me = wrld.me(self)
         if me is None or any(bomb.owner == me for bomb in wrld.bombs.values()):
             return False
-
-        for dx, dy in TestCharacter.moves:
-            x, y = me.x + dx, me.y + dy
-            if self.Test.valid_spot(wrld, x, y) and not self.danger(wrld, x, y):
-                return True
-        return False
+        return self.Test.bomb_escape_move(wrld, (me.x, me.y)) is not None
 
     def _available_action_indices(self):
-        available_actions = list(range(len(ACTION_SPACE)))
+        available_actions = list(range(len(ACTION_SPACE) - 1))
         wrld = getattr(self, 'world', None)
         if wrld is None:
             return available_actions
 
-        bomb_action = len(ACTION_SPACE) - 1
-        if not self._can_escape_bomb(wrld):
-            available_actions.remove(bomb_action)
+        me = wrld.me(self)
+        if me is None:
+            return available_actions
+
+        start = (me.x, me.y)
+        safe_actions = [
+            action_idx
+            for action_idx in available_actions
+            if self.Test.is_safe_step(
+                wrld,
+                start,
+                (start[0] + ACTION_SPACE[action_idx][0],
+                 start[1] + ACTION_SPACE[action_idx][1]),
+            )
+        ]
+        if safe_actions:
+            moving_actions = [
+                action_idx
+                for action_idx in safe_actions
+                if ACTION_SPACE[action_idx][:2] != (0, 0)
+            ]
+            if moving_actions:
+                safe_actions = moving_actions
+            available_actions = safe_actions
+
+        goal = self.Test.get_exit(wrld)
+        if self.Test.plan_bomb(wrld, start, goal) is not None:
+            available_actions.append(len(ACTION_SPACE) - 1)
 
         imminent_bombs = [bomb for bomb in wrld.bombs.values() if bomb.timer <= 1]
-        me = wrld.me(self)
-        if imminent_bombs and me is not None:
+        if imminent_bombs:
             safe_actions = []
             for action_idx in available_actions:
                 dx, dy, place_bomb = ACTION_SPACE[action_idx]
@@ -210,6 +207,21 @@ class Agent(CharacterEntity):
                 return safe_actions
 
         return available_actions
+
+    def _action_for_index(self, action_idx, wrld=None):
+        if action_idx != len(ACTION_SPACE) - 1:
+            return ACTION_SPACE[action_idx]
+
+        wrld = wrld or getattr(self, 'world', None)
+        me = wrld.me(self) if wrld is not None else None
+        if me is None:
+            raise ValueError("A world and agent position are required for bomb actions")
+        escape = self.Test.plan_bomb(
+            wrld, (me.x, me.y), self.Test.get_exit(wrld)
+        )
+        if escape is None:
+            raise ValueError("Bomb action selected without a safe, useful escape plan")
+        return (escape[0], escape[1], 1)
 
     def get_state(self, wrld):
 
@@ -266,13 +278,15 @@ class Agent(CharacterEntity):
         wall_1_1 = valid_1_1 and wrld.wall_at(me.x + 1, me.y + 1)
         danger_1_1 = self.danger(wrld, me.x + 1, me.y + 1)
 
-        exit = TestCharacter.get_exit(self.Test, wrld)
-        exitdx = exit[0] - me.x
-        exitdy = exit[1] - me.y
-
-        path = TestCharacter.astar_path_to_exit(
-            self.Test, wrld, (me.x, me.y), exit
-        )
+        exit = self.Test.get_exit(wrld)
+        if exit is None:
+            exitdx = exitdy = distance_to_exit = 0
+            path = []
+        else:
+            exitdx = exit[0] - me.x
+            exitdy = exit[1] - me.y
+            distance_to_exit = self.Test.exit_distance((me.x, me.y), exit)
+            path = self.Test.astar(wrld, (me.x, me.y), exit)
         if path and len(path) > 1:
             astarx, astary = path[1]
             pathToExit = len(path) - 1
@@ -282,12 +296,10 @@ class Agent(CharacterEntity):
 
         bomb_list = list(wrld.bombs.values())
         if bomb_list:
-            bombx, bomby = self.me.x == bomb_list[0].x, self.me.y == bomb_list[0].y
+            bombx, bomby = me.x == bomb_list[0].x, me.y == bomb_list[0].y
             bomb = 1
         else:
             bombx, bomby, bomb = 0, 0, 0
-
-        distance_to_exit = np.sqrt(abs(exitdx) + abs(exitdy))
 
         state = [
             exitdx,
@@ -430,10 +442,152 @@ class Agent(CharacterEntity):
         self.trainer.train_step(state, action, reward, next_state, game_over)
 
     def get_action(self, state):
-        return ACTION_SPACE[self._get_action_index(state)]
+        action_idx = self._get_action_index(state)
+        return self._action_for_index(action_idx)
+
+    def _no_monster_action_index(self, wrld, available_actions):
+        if self.Test.monster_list(wrld):
+            return None
+
+        me = wrld.me(self)
+        goal = self.Test.get_exit(wrld)
+        if me is None or goal is None:
+            return None
+
+        start = (me.x, me.y)
+        bomb_action = len(ACTION_SPACE) - 1
+        if bomb_action in available_actions:
+            return bomb_action
+
+        target = None
+        if not wrld.bombs:
+            target = self.Test.breach_move(wrld, start, goal)
+        if target is None:
+            path = self.Test.astar(wrld, start, goal)
+            if path and len(path) > 1:
+                target = path[1]
+            else:
+                target = goal
+                if wrld.bombs and not self.Test.is_threatened(wrld, start):
+                    return ACTION_SPACE.index((0, 0, 0))
+
+        safe_actions = [
+            action_idx for action_idx in available_actions
+            if action_idx != bomb_action
+            and self.Test.is_safe_step(
+                wrld,
+                start,
+                (start[0] + ACTION_SPACE[action_idx][0],
+                 start[1] + ACTION_SPACE[action_idx][1]),
+            )
+        ]
+        candidates = safe_actions or [
+            action_idx for action_idx in available_actions
+            if action_idx != bomb_action
+        ]
+        if not candidates:
+            return None
+
+        unthreatened = []
+        for action_idx in candidates:
+            dx, dy, _ = ACTION_SPACE[action_idx]
+            destination = (start[0] + dx, start[1] + dy)
+            if not self.Test.is_threatened(wrld, destination):
+                unthreatened.append(action_idx)
+        if unthreatened:
+            candidates = unthreatened
+
+        def route_cost(action_idx):
+            dx, dy, _ = ACTION_SPACE[action_idx]
+            destination = (
+                max(0, min(wrld.width() - 1, start[0] + dx)),
+                max(0, min(wrld.height() - 1, start[1] + dy)),
+            )
+            if wrld.wall_at(*destination):
+                destination = start
+            path = self.Test.astar(wrld, destination, target)
+            if path:
+                return len(path)
+            return abs(destination[0] - target[0]) + abs(destination[1] - target[1])
+
+        return min(candidates, key=route_cost)
+
+    def _trapped_monster_action_index(self, wrld, available_actions):
+        trapped = self.Test.trapped_monsters(wrld)
+        me = wrld.me(self)
+        goal = self.Test.get_exit(wrld)
+        if not trapped or me is None or goal is None or wrld.bombs:
+            return None
+
+        start = (me.x, me.y)
+        targets = {(monster.x, monster.y) for monster in trapped}
+        blast_action = len(ACTION_SPACE) - 1
+        bomb_sites = []
+        candidate_sites = set()
+        for target_x, target_y in targets:
+            candidate_sites.add((target_x, target_y))
+            for dx, dy in self.Test.CARDINALS:
+                for distance in range(1, getattr(wrld, "expl_range", 4) + 1):
+                    site = (target_x + dx * distance, target_y + dy * distance)
+                    if (not self.Test.in_bounds(wrld, *site)
+                            or wrld.wall_at(*site)):
+                        break
+                    candidate_sites.add(site)
+
+        for site in candidate_sites:
+            if site != start and not self.Test.valid_spot(wrld, *site):
+                continue
+            hit_targets = targets & self.Test.blast_cells(wrld, *site)
+            if not hit_targets or self.Test.plan_bomb(wrld, site, goal) is None:
+                continue
+            path = self.Test.astar(wrld, start, site)
+            if path:
+                bomb_sites.append((len(path), -len(hit_targets), site))
+
+        if not bomb_sites:
+            return None
+
+        _, _, site = min(bomb_sites)
+        if site == start:
+            return blast_action if blast_action in available_actions else None
+
+        safe_actions = [
+            action_idx for action_idx in available_actions
+            if action_idx != blast_action
+            and self.Test.is_safe_step(
+                wrld,
+                start,
+                (start[0] + ACTION_SPACE[action_idx][0],
+                 start[1] + ACTION_SPACE[action_idx][1]),
+            )
+        ]
+        if not safe_actions:
+            return None
+
+        def route_cost(action_idx):
+            dx, dy, _ = ACTION_SPACE[action_idx]
+            destination = (start[0] + dx, start[1] + dy)
+            path = self.Test.astar(wrld, destination, site)
+            return len(path) if path else float("inf")
+
+        action_idx = min(safe_actions, key=route_cost)
+        return action_idx if route_cost(action_idx) != float("inf") else None
 
     def _get_action_index(self, state):
         available_actions = self._available_action_indices()
+        wrld = getattr(self, 'world', None)
+        if wrld is not None:
+            trapped_action = self._trapped_monster_action_index(
+                wrld, available_actions
+            )
+            if trapped_action is not None:
+                return trapped_action
+
+            goal_action = self._no_monster_action_index(
+                wrld, available_actions
+            )
+            if goal_action is not None:
+                return goal_action
 
         if self.training == 4:
             self.epsilon = max(0.05, 0.40 * (0.995 ** self.n_games))
@@ -466,6 +620,19 @@ class Agent(CharacterEntity):
         next_wrld, events = next_wrld.next()
         reward = -1
         game_over = False
+
+        goal = self.Test.get_exit(wrld)
+        me = wrld.me(self)
+        next_me = next_wrld.me(self)
+        if goal is not None and me is not None and next_me is not None:
+            path_before = self.Test.astar(wrld, (me.x, me.y), goal)
+            path_after = self.Test.astar(
+                next_wrld, (next_me.x, next_me.y), goal
+            )
+            if path_before and path_after:
+                distance_before = len(path_before) - 1
+                distance_after = len(path_after) - 1
+                reward += PROGRESS_REWARD * (distance_before - distance_after)
 
         for event in events:
             if event.tpe == Event.CHARACTER_FOUND_EXIT:
@@ -502,7 +669,7 @@ class Agent(CharacterEntity):
     def trainself(self, wrld):
         state_old = self.get_state(wrld)
         action_idx = self._get_action_index(state_old)
-        action = ACTION_SPACE[action_idx]
+        action = self._action_for_index(action_idx, wrld)
         self.do_action(action)
         state_new, reward, score, game_over = self.scoring(wrld, action)
 
@@ -585,7 +752,7 @@ class Agent(CharacterEntity):
         self.world = wrld
         self.me = wrld.me(self)
         self.start = (self.me.x, self.me.y)
-        self.goal = TestCharacter.get_exit(self.Test, wrld)
+        self.goal = self.Test.get_exit(wrld)
 
         if self.training == 1:
             if (random.randint(0, 100) < 10):

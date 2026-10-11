@@ -14,7 +14,7 @@ from neuralnet import Agent
 map_file = 'map.txt'
 variant = int(sys.argv[1])
 drill = sys.argv[2]
-input_mode = int(sys.argv[3])
+input_mode = int(sys.argv[3]) if len(sys.argv) > 3 else 4
 if drill:
     map_file = drill
 
