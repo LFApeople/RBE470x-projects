@@ -11,9 +11,10 @@ from monsters.stupid_monster import StupidMonster
 # TODO This is your code!
 sys.path.insert(1, '../teamNN')
 from testcharacter import TestCharacter
+from neuralnet import Agent
 
 # Create the game
-random.seed(123) # TODO Change this if you want different random choices
+random.seed(random.randint(0,100)) # TODO Change this if you want different random choices
 g = Game.fromfile('map.txt')
 g.add_monster(StupidMonster("stupid", # name
                             "S",      # avatar
@@ -27,4 +28,4 @@ g.add_character(Agent("me", # name
 ))
 
 # Run!
-g.go()
+g.go(1)

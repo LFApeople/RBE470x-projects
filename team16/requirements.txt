@@ -1,23 +1,4 @@
-
-packaging
-parso
-pandas
-pexpect
-pickleshare
-Pillow
-prompt-toolkit
-ptyprocess
-pure-eval
-pygame
-Pygments
-pyparsing
-python-dateutil
-six
-stack-data
-sympy
 torch
-traitlets
-typing_extensions
-wcwidth
-zipp
-scipy
+numpy
+matplotlib
+pip install -r requirements.txt                       

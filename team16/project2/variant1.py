@@ -26,4 +26,4 @@ g.add_character(Agent("me", # name
 ))
 
 # Run!
-g.go()
+g.go(1)

@@ -15,22 +15,13 @@ import numpy as np
 from model import DEVICE, Linear_QNet, QTrainer
 import matplotlib.pyplot as plt
 
+# This plot is of vital importance as it was the only thing I bothered to set-up that gave me information for how the model was doing during training. It will show each game's score and total running mean. I wanted more information to see inside of the model and tell how the network is doing: what weight's are important, proper sizing, are there useless features? But settled for this as the midpoint of effort while I was already extremely tired working on it.
 plt.ion()
 
-class Plot(ABC):
+class TrainingPlot(ABC):
     def __init__(self, title='Training...'):
-        self.title = title
+            self.title = title
 
-    @abstractmethod
-    def render(self, scores, mean_scores):
-        raise NotImplementedError
-
-    @abstractmethod
-    def save(self, path):
-        raise NotImplementedError
-
-
-class TrainingPlot(Plot):
     def render(self, scores, mean_scores):
         scores = list(scores or [])
         mean_scores = list(mean_scores or [])
@@ -79,6 +70,7 @@ def plot(scores, mean_scores, title='Training...', save_path=None):
         plotter.save(save_path)
 
 
+# Some values to configure the memory and learning of the network. I had no way to really tell if they were good, so I looked at some other networks and took some approximations.
 MAX_MEMORY = 100_000
 BATCH_SIZE = 256
 LR = 0.001
@@ -90,8 +82,10 @@ ACTION_SPACE = (
     (0, 0, 1),
 )
 
+# Where all the magic happens
 class Agent(CharacterEntity):
-    
+
+    # More variables in the configuration that could be changed.
     def __init__(self, name, avatar, x, y, mode=0):
         super().__init__(name, avatar, x, y)
         self.Test = TestCharacter(name, avatar, x, y)
@@ -107,6 +101,7 @@ class Agent(CharacterEntity):
         self.training = mode # 0 = evaluation, 1 = mixed training, 2 = guided, 3 = teaching, 4 = self-training
         self._plot_scores = []
         self._plot_mean_scores = []
+        # Training modes for guided and teaching were used in some drills, but got dropped by the end.
         self._total_score = 0
         self.bankedGames = [
             "bdsccccwddds",
@@ -126,6 +121,7 @@ class Agent(CharacterEntity):
         )
         self._load_training_state()
 
+    # Keeping the values that go into state to be consistent even with trickery that is done to get them.
     def _normalize_state_value(self, value):
         if value is None:
             return 0
@@ -138,6 +134,7 @@ class Agent(CharacterEntity):
         except (TypeError, ValueError):
             return 1
 
+    # Using some functions from the Q approximate in Testcharacter to get information on the world
     def danger(self, wrld, x, y):
         if not self.Test.valid_spot(wrld, x, y):
             return 1
@@ -152,6 +149,7 @@ class Agent(CharacterEntity):
             return False
         return self.Test.bomb_escape_move(wrld, (me.x, me.y)) is not None
 
+    # Some fuckery for maneul correction to take over and help when the Neural Network is dumb and tries to make really bad decisions.
     def _available_action_indices(self):
         available_actions = list(range(len(ACTION_SPACE) - 1))
         wrld = getattr(self, 'world', None)
@@ -223,6 +221,7 @@ class Agent(CharacterEntity):
             raise ValueError("Bomb action selected without a safe, useful escape plan")
         return (escape[0], escape[1], 1)
 
+    # All the features and information about the environment that is fed into the network to try and make it smart. Originall had more features but they were culled, still unsure about how many of these approach 0 effect after L1 Regularization; if I could see in the weighting then I probably would have removed more of these.
     def get_state(self, wrld):
 
         me = wrld.me(self) or self.me
@@ -301,6 +300,7 @@ class Agent(CharacterEntity):
         else:
             bombx, bomby, bomb = 0, 0, 0
 
+        # Combine all the information gathered into one really long list
         state = [
             exitdx,
             exitdy,
@@ -360,9 +360,11 @@ class Agent(CharacterEntity):
         state = [self._normalize_state_value(v) for v in state]
         return np.array(state, dtype=int)
 
+    # Add to replay buffer
     def remember(self, state, action, reward, next_state, game_over):
         self.memory.append((state, action, reward, next_state, game_over))
 
+    # Get training data that is used for the graphs and plotting. My only real insight into how the network is doing.
     def _load_training_state(self):
         state_dir = os.path.dirname(self._training_state_path)
         checkpoint_prefix = f"{os.path.basename(self._training_state_path)}.checkpoint-"
@@ -396,6 +398,7 @@ class Agent(CharacterEntity):
             self._plot_mean_scores = []
             self._total_score = 0
 
+    # Saves training data. I orinally set this up because the agent was being re-initialized every game, but then figured out how to configure training to be smarted. Kept this sso that I could have one plott across multiple tests as the model learned.
     def _save_training_state(self):
         state_dir = os.path.dirname(self._training_state_path)
         os.makedirs(state_dir, exist_ok=True)
@@ -441,10 +444,12 @@ class Agent(CharacterEntity):
     def train_short_memory(self, state, action, reward, next_state, game_over):
         self.trainer.train_step(state, action, reward, next_state, game_over)
 
+    # Use the network to convert state into q value for action
     def get_action(self, state):
         action_idx = self._get_action_index(state)
         return self._action_for_index(action_idx)
 
+    # Used to encourage the bot to be go for the exit when there is no monsters.
     def _no_monster_action_index(self, wrld, available_actions):
         if self.Test.monster_list(wrld):
             return None
@@ -512,6 +517,7 @@ class Agent(CharacterEntity):
 
         return min(candidates, key=route_cost)
 
+    # Even with this the network is very scared of monsters that can't touch it. Tried to encourage aggressive behavior
     def _trapped_monster_action_index(self, wrld, available_actions):
         trapped = self.Test.trapped_monsters(wrld)
         me = wrld.me(self)
@@ -573,6 +579,42 @@ class Agent(CharacterEntity):
         action_idx = min(safe_actions, key=route_cost)
         return action_idx if route_cost(action_idx) != float("inf") else None
 
+    def _avoid_monster_idle(self, wrld, action_idx):
+        monsters = self.Test.monster_list(wrld)
+        me = wrld.me(self)
+        if not monsters or me is None or action_idx == len(ACTION_SPACE) - 1:
+            return action_idx
+
+        start = (me.x, me.y)
+        dx, dy, _ = ACTION_SPACE[action_idx]
+        destination = (start[0] + dx, start[1] + dy)
+        selected_moves = (dx, dy) != (0, 0)
+        selected_is_legal = (
+            selected_moves
+            and self.Test.in_bounds(wrld, *destination)
+            and self.Test.valid_spot(wrld, *destination)
+        )
+        if selected_is_legal:
+            return action_idx
+
+        escape_actions = []
+        for candidate_idx, (move_x, move_y, place_bomb) in enumerate(ACTION_SPACE[:-1]):
+            if place_bomb or (move_x, move_y) == (0, 0):
+                continue
+            candidate = (start[0] + move_x, start[1] + move_y)
+            if (not self.Test.in_bounds(wrld, *candidate)
+                    or not self.Test.valid_spot(wrld, *candidate)):
+                continue
+            clearance = self.Test.monster_clearance(wrld, candidate)
+            threatened = self.Test.is_threatened(wrld, candidate)
+            escape_actions.append(
+                (clearance, not threatened, candidate_idx)
+            )
+
+        if escape_actions:
+            return max(escape_actions)[2]
+        return action_idx
+
     def _get_action_index(self, state):
         available_actions = self._available_action_indices()
         wrld = getattr(self, 'world', None)
@@ -592,7 +634,10 @@ class Agent(CharacterEntity):
         if self.training == 4:
             self.epsilon = max(0.05, 0.40 * (0.995 ** self.n_games))
             if random.random() < self.epsilon:
-                return random.choice(available_actions)
+                action_idx = random.choice(available_actions)
+                if wrld is not None:
+                    return self._avoid_monster_idle(wrld, action_idx)
+                return action_idx
         else:
             self.epsilon = 0.0
 
@@ -603,14 +648,19 @@ class Agent(CharacterEntity):
             unavailable_actions = set(range(len(ACTION_SPACE))) - set(available_actions)
             if unavailable_actions:
                 q_values[list(unavailable_actions)] = -torch.inf
-            return int(q_values.argmax().item())
+            action_idx = int(q_values.argmax().item())
+        if wrld is not None:
+            return self._avoid_monster_idle(wrld, action_idx)
+        return action_idx
 
+    # Actually tell character to take the action found
     def do_action(self, action):
         if action[2]:
             self.place_bomb()
 
         self.move(action[0], action[1])
 
+    # Tries to keep a handle on what the bot is doing, if it is going to die or have game end, and give it proper incentives. Another area that could've been improved since the learning was so poor.
     def scoring(self, wrld, action):
         score = wrld.scores["me"]
         next_wrld = SensedWorld.from_world(wrld)
@@ -650,6 +700,7 @@ class Agent(CharacterEntity):
         state_new = self.get_state(next_wrld)
         return state_new, reward, score, game_over
 
+    # When the character detects that the game will end next turn it saves the current data before it is too late.
     def game_over(self, score):
         self.n_games += 1
         self.train_long_memory()
@@ -665,7 +716,7 @@ class Agent(CharacterEntity):
         self._save_training_state()
         plot(self._plot_scores, self._plot_mean_scores)
         
-    
+    # Core loop
     def trainself(self, wrld):
         state_old = self.get_state(wrld)
         action_idx = self._get_action_index(state_old)
@@ -754,13 +805,8 @@ class Agent(CharacterEntity):
         self.start = (self.me.x, self.me.y)
         self.goal = self.Test.get_exit(wrld)
 
+        # Selection of mode, sorta defunct. 0-just use current model | 1-try to have the model train itself | 2-Follow guided paths and learn from it; paired with 3-manuelly play the game and get a string of that game to teach the bot in 2
         if self.training == 1:
-            if (random.randint(0, 100) < 10):
-                self.training = 2
-            else:
-                self.training = 4
-
-        if self.training == 4:
             self.trainself(wrld)
         elif self.training == 2:
             self.trainguided(wrld)
@@ -768,5 +814,6 @@ class Agent(CharacterEntity):
             self.recordguided(wrld)
         else:
             state_old = self.get_state(wrld)
-            action = self.get_action(state_old)
+            action_idx = self._get_action_index(state_old)
+            action = self._action_for_index(action_idx, wrld)
             self.do_action(action)
